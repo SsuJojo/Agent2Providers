@@ -121,13 +121,14 @@ jobs:
         if: steps.check.outputs.should_release == 'true'
         env:
           AGENT2API_PLUGIN_KEY: plugin-signing-key.json
+          SKIP_SIGNING: ${{ secrets.AGENT2API_PLUGIN_KEY == 'SKIP' }}
         run: |
           set -euo pipefail
-          if [[ -z "${{ secrets.AGENT2API_PLUGIN_KEY }}" ]]; then
-            echo "未配置签名私钥，发布未签名包。"
+          if [[ "$SKIP_SIGNING" == 'true' ]]; then
+            echo "签名私钥尚未配置，发布未签名包。"
             exit 0
           fi
-          echo "${{ secrets.AGENT2API_PLUGIN_KEY }}" > plugin-signing-key.json
+          printf '%s' "$AGENT2API_PLUGIN_KEY" > plugin-signing-key.json
           node scripts/sign.mjs sign --zip dist/*.zip
           rm -f plugin-signing-key.json
 
