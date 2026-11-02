@@ -118,7 +118,7 @@ jobs:
         run: node scripts/pack.mjs --out dist
 
       - name: Sign plugin package
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.check.outputs.should_release == 'true' && secrets.AGENT2API_PLUGIN_KEY != ''
         env:
           AGENT2API_PLUGIN_KEY: plugin-signing-key.json
         run: |
