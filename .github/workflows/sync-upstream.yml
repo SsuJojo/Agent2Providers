@@ -1,0 +1,113 @@
+name: sync-upstream
+
+# Sync the official provider plugin into this fork, then keep local patches.
+# Runs every 6 hours and can be triggered manually.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream
+        run: git remote add upstream https://github.com/ProvidersPlugin/Agent2Providers.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main --tags
+
+      - name: Check for upstream updates
+        id: check
+        run: |
+          set -euo pipefail
+          LOCAL="$(git rev-parse HEAD)"
+          UPSTREAM="$(git rev-parse upstream/main)"
+          if [[ "$LOCAL" == "$UPSTREAM" ]]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream updates."
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$LOCAL" "$UPSTREAM"; then
+            echo "mode=fast-forward" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor "$UPSTREAM" "$LOCAL"; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward or merge upstream
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        id: merge
+        run: |
+          set -euo pipefail
+          BEFORE="$(git rev-parse HEAD)"
+          if [[ "${{ steps.check.outputs.mode }}" == "fast-forward" ]]; then
+            git merge --ff-only upstream/main
+          else
+            git merge --no-ff --no-edit upstream/main
+          fi
+          echo "before_sha=$BEFORE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate local patches survive
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        run: |
+          set -euo pipefail
+          grep -q 'prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+          grep -q 'prepare_body_preserves_prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+
+      - name: Push updated main
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        run: git push origin main
+
+      - name: Create release tag
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./pack.json').version")"
+          TAG="v${VERSION}-fork.${GITHUB_RUN_NUMBER}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG="$TAG.$(date -u +%Y%m%d%H%M%S)"
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build plugin package
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        run: node scripts/pack.mjs --out dist
+
+      - name: Upload package artifact
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-providers-${{ steps.tag.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
