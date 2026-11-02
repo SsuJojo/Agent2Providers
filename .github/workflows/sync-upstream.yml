@@ -115,7 +115,7 @@ jobs:
 
       - name: Build plugin package
         if: steps.check.outputs.should_release == 'true'
-        run: node scripts/pack.mjs --out dist
+        run: node scripts/pack.mjs --out dist --target x86_64-pc-windows-msvc
 
       - name: Sign plugin package
         if: steps.check.outputs.should_release == 'true'
