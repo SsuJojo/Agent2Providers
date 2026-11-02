@@ -1,6 +1,6 @@
 [package]
-name = "agent2api-providers"
-description = "Agent2API 官方提供商插件包：21 家内置提供商实现"
+name = "ssujojo-providers"
+description = "SsuJojo 维护的 Agent2API 提供商插件包"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "agent2api-providers"
+name = "ssujojo-providers"
 path = "src/main.rs"
 
 # ── feature 设计 ────────────────────────────────────────────

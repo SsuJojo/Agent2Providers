@@ -12,7 +12,7 @@
  * node scripts/sign.mjs keygen
  *
  * # 2. 给已打好的 zip 签名（产出写回原 zip，并打印签名块）
- * node scripts/sign.mjs sign --zip dist/agent2api-providers-0.1.0-x86_64-pc-windows-msvc.zip
+ * node scripts/sign.mjs sign --zip dist/ssujojo-providers-0.1.0-x86_64-pc-windows-msvc.zip
  * ```
  *
  * ── 为什么签名在**打好的 zip 之外**做 ────────────────────────
@@ -226,7 +226,7 @@ function keygen(argv) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519')
   const publicHex = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex')
   const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' })
-  const keyId = `official-${new Date().getFullYear()}`
+  const keyId = `ssujojo-${new Date().getFullYear()}`
   writeFileSync(path, JSON.stringify({ keyId, privateKeyPem: privatePem }, null, 2), 'utf8')
   console.log(`[sign] 私钥已写入：${path}`)
   console.log('[sign] ⚠ 这个文件绝不能进仓库，也不要发给别人')

@@ -1,6 +1,6 @@
 {
-  "id": "agent2api-providers",
-  "name": "Agent2API 官方提供商",
+  "id": "ssujojo-providers",
+  "name": "SsuJojo 提供商",
   "version": "0.2.1",
   "protocol": 1,
   "providers": [
@@ -197,11 +197,11 @@
     }
   ],
   "entry": {
-    "x86_64-pc-windows-msvc": "bin/agent2api-providers.exe",
-    "x86_64-unknown-linux-gnu": "bin/agent2api-providers",
-    "aarch64-unknown-linux-gnu": "bin/agent2api-providers",
-    "x86_64-apple-darwin": "bin/agent2api-providers",
-    "aarch64-apple-darwin": "bin/agent2api-providers"
+    "x86_64-pc-windows-msvc": "bin/ssujojo-providers.exe",
+    "x86_64-unknown-linux-gnu": "bin/ssujojo-providers",
+    "aarch64-unknown-linux-gnu": "bin/ssujojo-providers",
+    "x86_64-apple-darwin": "bin/ssujojo-providers",
+    "aarch64-apple-darwin": "bin/ssujojo-providers"
   },
   "homepage": "https://github.com/ProvidersPlugin/Agent2Providers"
 }

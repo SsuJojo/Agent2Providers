@@ -9,9 +9,9 @@
  *
  * ── 产物形状（与网关 `plugin_host::install` 的期望逐字对应）──────
  * ```text
- * agent2api-providers-<version>-<target>.zip
+ * ssujojo-providers-<version>-<target>.zip
  *   pack.json                     ← 原样拷自 pack.json
- *   bin/agent2api-providers[.exe] ← release 二进制
+ *   bin/ssujojo-providers[.exe] ← release 二进制
  * ```
  * 网关把 zip 解到 `plugins/<id>/<version>/`，读 `pack.json` 的 `entry` 找二进制，
  * 所以**目录结构不能改**（`bin/` 那一层是 `pack.json` 里写死的）。
@@ -64,7 +64,7 @@ function hostTriple() {
  *  按 **target** 判断而不是宿主：交叉编译时两者不同（在 Linux 上打 Windows 包
  *  会去找 `.exe`，而宿主的 `process.platform` 给不出这个信息）。 */
 function binaryName(target) {
-  return target.includes('windows') ? 'agent2api-providers.exe' : 'agent2api-providers'
+  return target.includes('windows') ? 'ssujojo-providers.exe' : 'ssujojo-providers'
 }
 
 /**
@@ -301,7 +301,7 @@ function main() {
     : join(PLUGIN_DIR, 'target', target, 'release', binaryName(target))
 
   if (options.build) {
-    const args = ['build', '--release', '-p', 'agent2api-providers']
+    const args = ['build', '--release', '-p', 'ssujojo-providers']
     if (!native) args.push('--target', target)
     console.log(`[pack] 编译 release 产物（cargo ${args.join(' ')}）…`)
     execFileSync('cargo', args, { cwd: PLUGIN_DIR, stdio: 'inherit' })

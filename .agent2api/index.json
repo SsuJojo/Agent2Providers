@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    {
+      "id": "ssujojo-providers",
+      "name": "SsuJojo 提供商",
+      "description": "SsuJojo 维护的提供商插件，包含 Trae 缓存键修复；与官方插件并列安装。",
+      "official": false,
+      "author": "SsuJojo",
+      "manifest": "manifest.json",
+      "icon": "icon.png",
+      "source": { "repo": "SsuJojo/Agent2Providers" }
+    }
+  ]
+}

@@ -104,10 +104,32 @@ jobs:
         if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
         run: node scripts/pack.mjs --out dist
 
+      - name: Sign plugin package
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        env:
+          AGENT2API_PLUGIN_KEY: plugin-signing-key.json
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.AGENT2API_PLUGIN_KEY }}" > plugin-signing-key.json
+          node scripts/sign.mjs sign --zip dist/*.zip
+          rm -f plugin-signing-key.json
+
+      - name: Create GitHub release
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/*.zip \
+            --title "SsuJojo Providers v$VERSION" \
+            --notes "自动同步官方 Agent2Providers 并保留本地修复。"
+
       - name: Upload package artifact
         if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
         uses: actions/upload-artifact@v4
         with:
-          name: agent2api-providers-${{ steps.tag.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+          name: ssujojo-providers-${{ steps.tag.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
           path: dist/*.zip
           if-no-files-found: error

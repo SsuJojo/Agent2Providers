@@ -20,7 +20,7 @@
  *
  * ── 用法 ──────────────────────────────────────────────────────
  *   node scripts/verify.mjs
- *   node scripts/verify.mjs --exe path/to/agent2api-providers.exe
+ *   node scripts/verify.mjs --exe path/to/ssujojo-providers.exe
  *
  * 退出码：0 = 全部通过；1 = 有用例失败。
  */
@@ -36,7 +36,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
  *  CI 里显式传 `--exe`，这个默认值只服务于「本地跑一次」的场景。 */
 const DEFAULT_EXE = path.join(
   ROOT, 'target', 'release',
-  process.platform === 'win32' ? 'agent2api-providers.exe' : 'agent2api-providers',
+  process.platform === 'win32' ? 'ssujojo-providers.exe' : 'ssujojo-providers',
 )
 
 /** 当前平台的三元组（与 `plugin_host::rpc::target_triple()` 和

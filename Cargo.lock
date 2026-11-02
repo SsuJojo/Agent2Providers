@@ -64,37 +64,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent2api-providers"
-version = "0.2.1"
-dependencies = [
- "aes",
- "aes-gcm",
- "agent2api-provider-protocol",
- "agent2api-provider-sdk",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "flate2",
- "futures",
- "getrandom 0.2.17",
- "hmac",
- "image",
- "md-5",
- "num-bigint",
- "p256",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tokio",
- "tokio-tungstenite",
- "url",
- "windows",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,6 +1653,37 @@ dependencies = [
  "js-sys",
  "rsqlite-vfs",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ssujojo-providers"
+version = "0.2.1"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "agent2api-provider-protocol",
+ "agent2api-provider-sdk",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "flate2",
+ "futures",
+ "getrandom 0.2.17",
+ "hmac",
+ "image",
+ "md-5",
+ "num-bigint",
+ "p256",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "windows",
 ]
 
 [[package]]
