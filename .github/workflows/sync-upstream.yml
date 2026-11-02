@@ -57,9 +57,10 @@ jobs:
           echo "updated=true" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
           echo "local_sha=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Fast-forward or merge upstream
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.check.outputs.should_release == 'true'
         id: merge
         run: |
           set -euo pipefail
@@ -79,11 +80,11 @@ jobs:
           grep -q 'prepare_body_preserves_prompt_cache_key' crates/providers/src/providers/trae/payload.rs
 
       - name: Push updated main
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode == 'fast-forward'
+        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.mode == 'fast-forward'
         run: git push origin main
 
       - name: Create release tag
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.check.outputs.should_release == 'true'
         id: tag
         run: |
           set -euo pipefail
@@ -107,15 +108,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none' && steps.tag.outputs.no-local-changes != 'true'
+        if: steps.check.outputs.should_release == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build plugin package
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.check.outputs.should_release == 'true'
         run: node scripts/pack.mjs --out dist
 
       - name: Sign plugin package
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.check.outputs.should_release == 'true'
         env:
           AGENT2API_PLUGIN_KEY: plugin-signing-key.json
         run: |
@@ -125,7 +126,7 @@ jobs:
           rm -f plugin-signing-key.json
 
       - name: Create GitHub release
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.check.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
