@@ -118,11 +118,15 @@ jobs:
         run: node scripts/pack.mjs --out dist
 
       - name: Sign plugin package
-        if: steps.check.outputs.should_release == 'true' && secrets.AGENT2API_PLUGIN_KEY != ''
+        if: steps.check.outputs.should_release == 'true'
         env:
           AGENT2API_PLUGIN_KEY: plugin-signing-key.json
         run: |
           set -euo pipefail
+          if [[ -z "${{ secrets.AGENT2API_PLUGIN_KEY }}" ]]; then
+            echo "未配置签名私钥，发布未签名包。"
+            exit 0
+          fi
           echo "${{ secrets.AGENT2API_PLUGIN_KEY }}" > plugin-signing-key.json
           node scripts/sign.mjs sign --zip dist/*.zip
           rm -f plugin-signing-key.json
