@@ -85,6 +85,8 @@ jobs:
 
       - name: Create release tag
         if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         id: tag
         run: |
           set -euo pipefail
