@@ -139,7 +139,7 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" dist/*.zip \
+          gh release create "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" \
             --title "SsuJojo Providers v$VERSION" \
             --notes "自动同步官方 Agent2Providers 并保留本地修复。"
 
