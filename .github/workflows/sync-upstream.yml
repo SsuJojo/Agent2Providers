@@ -26,17 +26,21 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Add upstream
+        shell: bash
         run: git remote add upstream https://github.com/ProvidersPlugin/Agent2Providers.git
 
       - name: Fetch upstream
+        shell: bash
         run: git fetch upstream main --tags
 
       - name: Check for upstream updates
+        shell: bash
         id: check
         run: |
           set -euo pipefail
@@ -60,6 +64,7 @@ jobs:
           echo "should_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Fast-forward or merge upstream
+        shell: bash
         if: steps.check.outputs.should_release == 'true'
         id: merge
         run: |
@@ -73,6 +78,7 @@ jobs:
           echo "before_sha=$BEFORE" >> "$GITHUB_OUTPUT"
 
       - name: Validate local patches survive
+        shell: bash
         if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
         run: |
           set -euo pipefail
@@ -80,10 +86,12 @@ jobs:
           grep -q 'prepare_body_preserves_prompt_cache_key' crates/providers/src/providers/trae/payload.rs
 
       - name: Push updated main
+        shell: bash
         if: steps.check.outputs.should_release == 'true' && steps.check.outputs.mode == 'fast-forward'
         run: git push origin main
 
       - name: Create release tag
+        shell: bash
         if: steps.check.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,10 +124,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Build plugin package
+        shell: bash
         if: steps.check.outputs.should_release == 'true'
         run: node scripts/pack.mjs --out dist --target x86_64-pc-windows-msvc
 
       - name: Sign plugin package
+        shell: bash
         if: steps.check.outputs.should_release == 'true'
         env:
           AGENT2API_PLUGIN_KEY: plugin-signing-key.json
@@ -135,6 +145,7 @@ jobs:
           rm -f plugin-signing-key.json
 
       - name: Create GitHub release
+        shell: bash
         if: steps.check.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
