@@ -42,7 +42,6 @@ jobs:
           set -euo pipefail
           LOCAL="$(git rev-parse HEAD)"
           UPSTREAM="$(git rev-parse upstream/main)"
-          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
           if [[ "$LOCAL" == "$UPSTREAM" ]]; then
             echo "updated=false" >> "$GITHUB_OUTPUT"
             echo "No upstream updates."
@@ -58,7 +57,6 @@ jobs:
           echo "updated=true" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
           echo "local_sha=$LOCAL" >> "$GITHUB_OUTPUT"
-          echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Fast-forward or merge upstream
         if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
@@ -90,18 +88,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./pack.json').version")"
-          if [[ -n "$LAST_TAG" ]] && git rev-parse -q --verify "refs/tags/$LAST_TAG" >/dev/null; then
-            LAST_COMMIT="$(git rev-list -n 1 "$LAST_TAG")"
+          LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          if [[ -n "$LAST_RELEASE_TAG" ]]; then
+            LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
             if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
               echo "no-local-changes=true" >> "$GITHUB_OUTPUT"
-              echo "No local changes since last release."
-              exit 0
-            fi
-          fi
-          if [[ -n "$LAST_TAG" ]]; then
-            LAST_COMMIT="$(git rev-list -n 1 "$LAST_TAG")"
-            if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
-              echo "no-local-changes=$true" >> "$GITHUB_OUTPUT"
               echo "No local changes since last release."
               exit 0
             fi
