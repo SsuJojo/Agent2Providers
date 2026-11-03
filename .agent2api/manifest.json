@@ -4,6 +4,7 @@
   "release": {
     "repo": "SsuJojo/Agent2Providers",
     "tag": "v{version}-fork.{run}",
+    "altTags": ["v{version}-fork-beta.{run}"],
     "asset": "{id}-{version}-{target}.zip"
   }
 }
