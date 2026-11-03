@@ -1,0 +1,193 @@
+name: sync-upstream-beta
+
+# Sync the upstream beta branch into this fork's beta branch, then keep local
+# patches. Releases are published as prereleases so gateway beta-channel users
+# pick them up; the package id is rewritten to ssujojo-providers before packing.
+on:
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "即使上游没有变化也重新构建并发布（验证签名与构建链路）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-beta
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fork beta
+        uses: actions/checkout@v4
+        with:
+          ref: beta
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream
+        shell: bash
+        run: git remote add upstream https://github.com/ProvidersPlugin/Agent2Providers.git
+
+      - name: Fetch upstream
+        shell: bash
+        run: git fetch upstream beta --tags
+
+      - name: Check for upstream updates
+        shell: bash
+        id: check
+        run: |
+          set -euo pipefail
+          LOCAL="$(git rev-parse HEAD)"
+          UPSTREAM="$(git rev-parse upstream/beta)"
+          if [[ "$LOCAL" == "$UPSTREAM" ]]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            if [[ "${{ inputs.force_release }}" == "true" ]]; then
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "No upstream updates; force_release requested."
+            else
+              echo "No upstream updates."
+            fi
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$LOCAL" "$UPSTREAM"; then
+            echo "mode=fast-forward" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor "$UPSTREAM" "$LOCAL"; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "local_sha=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward or merge upstream
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        id: merge
+        run: |
+          set -euo pipefail
+          BEFORE="$(git rev-parse HEAD)"
+          if [[ "${{ steps.check.outputs.mode }}" == "fast-forward" ]]; then
+            git merge --ff-only upstream/beta
+          else
+            git merge --no-ff --no-edit upstream/beta
+          fi
+          echo "before_sha=$BEFORE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate local patches survive
+        shell: bash
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        run: |
+          set -euo pipefail
+          grep -q 'prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+          grep -q 'prepare_body_preserves_prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+
+      - name: Push updated beta
+        shell: bash
+        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.mode == 'fast-forward'
+        run: git push origin beta
+
+      - name: Rewrite pack id for fork release
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs')
+          const pack = JSON.parse(fs.readFileSync('pack.json', 'utf8'))
+          pack.id = 'ssujojo-providers'
+          fs.writeFileSync('pack.json', JSON.stringify(pack, null, 2) + '\n')
+          NODE
+
+      - name: Create release tag
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./pack.json').version")"
+          if [[ "${{ inputs.force_release }}" != "true" ]]; then
+            LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
+            if [[ -n "$LAST_RELEASE_TAG" ]]; then
+              LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
+              if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
+                echo "no-local-changes=true" >> "$GITHUB_OUTPUT"
+                echo "No local changes since last release."
+                exit 0
+              fi
+            fi
+          fi
+          TAG="v${VERSION}-fork-beta.${GITHUB_RUN_NUMBER}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG="$TAG.$(date -u +%Y%m%d%H%M%S)"
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.check.outputs.should_release == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build plugin package
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        run: node scripts/pack.mjs --out dist --target x86_64-pc-windows-msvc
+
+      - name: Sign plugin package
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          PLUGIN_KEY_JSON: ${{ secrets.AGENT2API_PLUGIN_KEY }}
+          SKIP_SIGNING: ${{ secrets.AGENT2API_PLUGIN_KEY == 'SKIP' }}
+        run: |
+          set -euo pipefail
+          if [[ "$SKIP_SIGNING" == 'true' ]]; then
+            echo "签名私钥尚未配置，发布未签名包。"
+            exit 0
+          fi
+          printf '%s' "$PLUGIN_KEY_JSON" > plugin-signing-key.json
+          node scripts/sign.mjs sign --zip dist/*.zip --key plugin-signing-key.json
+          rm -f plugin-signing-key.json
+
+      - name: Create GitHub release
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --title "SsuJojo Providers v$VERSION (beta)" \
+            --notes "自动同步上游 Agent2Providers beta 并保留本地修复。"
+
+      - name: Upload package artifact
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssujojo-providers-${{ steps.tag.outputs.version }}-beta-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
