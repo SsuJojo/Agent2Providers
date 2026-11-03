@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
+    inputs:
+      force_release:
+        description: "即使上游没有变化也重新构建并发布（验证签名与构建链路）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -48,7 +53,13 @@ jobs:
           UPSTREAM="$(git rev-parse upstream/main)"
           if [[ "$LOCAL" == "$UPSTREAM" ]]; then
             echo "updated=false" >> "$GITHUB_OUTPUT"
-            echo "No upstream updates."
+            if [[ "${{ inputs.force_release }}" == "true" ]]; then
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "No upstream updates; force_release requested."
+            else
+              echo "No upstream updates."
+            fi
             exit 0
           fi
           if git merge-base --is-ancestor "$LOCAL" "$UPSTREAM"; then
@@ -99,13 +110,15 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./pack.json').version")"
-          LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
-          if [[ -n "$LAST_RELEASE_TAG" ]]; then
-            LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
-            if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
-              echo "no-local-changes=true" >> "$GITHUB_OUTPUT"
-              echo "No local changes since last release."
-              exit 0
+          if [[ "${{ inputs.force_release }}" != "true" ]]; then
+            LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
+            if [[ -n "$LAST_RELEASE_TAG" ]]; then
+              LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
+              if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
+                echo "no-local-changes=true" >> "$GITHUB_OUTPUT"
+                echo "No local changes since last release."
+                exit 0
+              fi
             fi
           fi
           TAG="v${VERSION}-fork.${GITHUB_RUN_NUMBER}"
@@ -132,7 +145,7 @@ jobs:
         shell: bash
         if: steps.check.outputs.should_release == 'true'
         env:
-          AGENT2API_PLUGIN_KEY: plugin-signing-key.json
+          PLUGIN_KEY_JSON: ${{ secrets.AGENT2API_PLUGIN_KEY }}
           SKIP_SIGNING: ${{ secrets.AGENT2API_PLUGIN_KEY == 'SKIP' }}
         run: |
           set -euo pipefail
@@ -140,8 +153,8 @@ jobs:
             echo "签名私钥尚未配置，发布未签名包。"
             exit 0
           fi
-          printf '%s' "$AGENT2API_PLUGIN_KEY" > plugin-signing-key.json
-          node scripts/sign.mjs sign --zip dist/*.zip
+          printf '%s' "$PLUGIN_KEY_JSON" > plugin-signing-key.json
+          node scripts/sign.mjs sign --zip dist/*.zip --key plugin-signing-key.json
           rm -f plugin-signing-key.json
 
       - name: Create GitHub release
