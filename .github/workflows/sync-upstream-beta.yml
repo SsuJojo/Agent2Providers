@@ -101,8 +101,12 @@ jobs:
         if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
         run: |
           set -euo pipefail
-          grep -q 'prompt_cache_key' crates/providers/src/providers/trae/payload.rs
-          grep -q 'prepare_body_preserves_prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+          # 校验 beta 分支**真的带着的**本地补丁。原来查的是 trae 的
+          # prompt_cache_key —— 那条只在 main 上，beta 上永远匹配不到，
+          # 一发生合并就会误报「本地补丁丢了」并中断同步。
+          grep -q 'check_body_limit' crates/providers/src/providers/catpaw/body_limit.rs
+          grep -q 'clamp_output_tokens' crates/providers/src/providers/officeace/chat.rs
+          grep -q 'channel_rejection' crates/providers/src/providers/workbuddy/errors.rs
 
       - name: Push updated beta
         shell: bash
