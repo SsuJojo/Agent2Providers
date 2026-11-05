@@ -180,7 +180,7 @@ jobs:
             --notes "自动同步官方 Agent2Providers 并保留本地修复。"
 
       - name: Upload package artifact
-        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        if: steps.tag.outputs.tag != ''
         uses: actions/upload-artifact@v4
         with:
           name: ssujojo-providers-${{ steps.tag.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
