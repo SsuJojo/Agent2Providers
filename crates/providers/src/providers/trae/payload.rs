@@ -75,6 +75,15 @@ pub fn prepare_body(source: &Value, route: &Route, session: &str) -> Result<Valu
         "request_id".to_string(),
         json!(super::oauth::uuid_v4().map_err(GatewayError::new)?),
     );
+    // 客户端的提示词缓存键原样透传：这是网关侧会话粘性的输入，
+    // 上游拿它做前缀缓存。丢掉它不会报错，只会让同一会话的每次请求
+    // 都重新计费 —— 属于「静默变贵」，比失败更难发现。
+    if let Some(prompt_cache_key) = obj
+        .get("prompt_cache_key")
+        .filter(|value| !value.is_null())
+    {
+        out.insert("prompt_cache_key".to_string(), prompt_cache_key.clone());
+    }
     if let Some(tools) = obj
         .get("tools")
         .filter(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty()))
@@ -456,4 +465,27 @@ fn normalize_tools(obj: &mut Value) {
         return;
     }
     obj["tools"] = Value::Array(kept);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::trae::catalog::Route;
+
+    /// `prompt_cache_key` 是本仓库的本地修复：上游同步把它丢掉不会报错，
+    /// 只会让同一会话的每次请求都重新计费。这条用例钉住它必须原样透传。
+    #[test]
+    fn prepare_body_preserves_prompt_cache_key() {
+        let body = json!({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "prompt_cache_key": "session-cache-key",
+            "unknown_field": true,
+        });
+        let route = Route::fallback("glm-5.2", PRIMARY_FUNCTION);
+        let outbound = prepare_body(&body, &route, "session-1").expect("prepare_body");
+
+        assert_eq!(outbound["prompt_cache_key"], "session-cache-key");
+        assert!(outbound.get("unknown_field").is_none());
+    }
 }

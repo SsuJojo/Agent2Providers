@@ -21,6 +21,8 @@
  * ── 用法 ──────────────────────────────────────────────────────
  *   node scripts/verify.mjs
  *   node scripts/verify.mjs --exe path/to/agent2api-providers.exe
+ *   node scripts/verify.mjs --exe target/aarch64-unknown-linux-gnu/release/agent2api-providers \
+ *     --runner qemu-aarch64-static
  *
  * 退出码：0 = 全部通过；1 = 有用例失败。
  */
@@ -59,6 +61,10 @@ const TARGET = (() => {
 const argv = process.argv.slice(2)
 const exeIndex = argv.indexOf('--exe')
 const EXE = exeIndex >= 0 ? argv[exeIndex + 1] : DEFAULT_EXE
+// 交叉编译出来的 arm64 二进制在 x86 runner 上不能直接 exec；给一个
+// 「怎么启动它」的前缀（qemu-user-static）。不给时行为与以前完全一致。
+const runnerIndex = argv.indexOf('--runner')
+const RUNNER = runnerIndex >= 0 ? argv[runnerIndex + 1] : ''
 
 /* ─── 结果记账 ───────────────────────────── */
 
@@ -141,10 +147,12 @@ class PluginClient {
   }
 
   async start() {
-    this.child = spawn(this.exe, [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...this.env },
-    })
+    this.child = RUNNER
+      ? spawn(RUNNER, [this.exe], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...this.env } })
+      : spawn(this.exe, [], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, ...this.env },
+      })
     this.child.stdout.setEncoding('utf8')
     this.child.stdout.on('data', (chunk) => this.onData(chunk))
     this.child.stderr.setEncoding('utf8')

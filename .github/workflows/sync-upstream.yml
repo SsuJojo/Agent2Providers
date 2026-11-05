@@ -1,8 +1,17 @@
-name: sync-upstream-beta
+name: sync-upstream-main
 
-# Sync the upstream beta branch into this fork's beta branch, then keep local
-# patches. Releases are published as prereleases so gateway beta-channel users
-# pick them up; the package id is rewritten to ssujojo-providers before packing.
+# 上游的 `main` 已停在 2026-10-23（最后一条是「从源码树移除签名脚本」），
+# 活跃开发全在 `beta`。本仓库原先的 main 工作流跟着 `upstream main`，
+# 于是永远同步不到新 provider —— 线上那份 0.2.1 就是这么来的。
+# 这里改成跟 `upstream beta`，把结果落到本仓库 `main`。
+#
+# ── 包 id 只在构建时改，不回写分支 ──────────────────────────
+# 以前这里直接改工作区的 pack.json 再 push origin beta，于是私有仓库自己的
+# `pack.json` 从上游的 `agent2api-providers` 变成了 `ssujojo-providers`。
+# 后果是下一次 `git merge upstream/beta` 在同一个文件上真冲突，而且源码与
+# 上游不再可比 ——「跟随上游」这件事变成靠人记得别改错。
+# 现在改成 `scripts/release-manifest.mjs --out dist/pack.json`：分支上永远是
+# 上游清单，产物里才是私有 id。
 on:
   schedule:
     - cron: "30 */6 * * *"
@@ -17,17 +26,23 @@ permissions:
   contents: write
 
 concurrency:
-  group: sync-upstream-beta
+  group: sync-upstream-main
   cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: windows-latest
+    # `build` / `publish` 靠这两个输出判断「这次到底要不要发」以及用哪个 tag。
+    # 没有它们时 `needs.sync.outputs.tag` 恒为空，整个构建矩阵会被静默跳过 ——
+    # 症状是「同步成功了但没有任何新包」，比失败更难发现。
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
-      - name: Checkout fork beta
+      - name: Checkout fork main
         uses: actions/checkout@v4
         with:
-          ref: beta
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -107,23 +122,12 @@ jobs:
           grep -q 'check_body_limit' crates/providers/src/providers/catpaw/body_limit.rs
           grep -q 'clamp_output_tokens' crates/providers/src/providers/officeace/chat.rs
           grep -q 'channel_rejection' crates/providers/src/providers/workbuddy/errors.rs
+          grep -q 'prompt_cache_key' crates/providers/src/providers/trae/payload.rs
 
-      - name: Push updated beta
+      - name: Push updated main
         shell: bash
         if: steps.check.outputs.should_release == 'true'
-        run: git push origin beta
-
-      - name: Rewrite pack id for fork release
-        shell: bash
-        if: steps.check.outputs.should_release == 'true'
-        run: |
-          set -euo pipefail
-          node - <<'NODE'
-          const fs = require('fs')
-          const pack = JSON.parse(fs.readFileSync('pack.json', 'utf8'))
-          pack.id = 'ssujojo-providers'
-          fs.writeFileSync('pack.json', JSON.stringify(pack, null, 2) + '\n')
-          NODE
+        run: git push origin main
 
       - name: Create release tag
         shell: bash
@@ -145,7 +149,7 @@ jobs:
               fi
             fi
           fi
-          TAG="v${VERSION}-fork-beta.${GITHUB_RUN_NUMBER}"
+          TAG="v${VERSION}-fork.${GITHUB_RUN_NUMBER}"
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             TAG="$TAG.$(date -u +%Y%m%d%H%M%S)"
           fi
@@ -156,20 +160,83 @@ jobs:
           # 上面提前 exit 时 tag 为空，后续所有构建 / 发布步骤都会跳过；
           # 这里把结论写进日志，免得把「无事可做」误读成「发布成功」。
 
+  build:
+    # 每个平台各自编译、各自启动一次（`verify.mjs` 是端到端握手，不是只看编译
+    # 是否通过）。Windows 包给桌面端，Linux 包给 gz4 这类无界面部署 ——
+    # 只出 Windows 包会让服务器继续跑官方插件，也就是这次故障的起点。
+    needs: sync
+    if: needs.sync.outputs.tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.tag }}
+          fetch-depth: 0
+
       - name: Install Rust
-        if: steps.tag.outputs.tag != ''
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Generate release manifest
+        shell: bash
+        run: node scripts/release-manifest.mjs --out dist/pack.json
+
+      - name: Check release manifest
+        shell: bash
+        run: |
+          node --test scripts/release-manifest.test.mjs
+          node scripts/release-manifest.mjs --check
 
       - name: Build plugin package
         shell: bash
-        if: steps.tag.outputs.tag != ''
-        run: node scripts/pack.mjs --out dist --target x86_64-pc-windows-msvc
+        env:
+          # Linux 的 x86_64 包要在 ubuntu-22.04（glibc 2.35）上编，
+          # 与运行时 Debian bookworm（2.36）兼容；不要换到更新的 runner。
+          CARGO_TARGET_DIR: target
+        run: node scripts/pack.mjs --out dist --target ${{ matrix.target }} --manifest dist/pack.json
+
+      - name: Verify plugin binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="target/${{ matrix.target }}/release/agent2api-providers"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then EXE="$EXE.exe"; fi
+          if [[ "${{ matrix.target }}" == aarch64-unknown-linux-gnu ]]; then
+            # 交叉编出来的 arm64 二进制在 x86 runner 上不能直接 exec。
+            # 用 qemu 跑同一套握手，至少证明「能加载 + 能说协议」；
+            # 没有这一步，arm64 包是纯编译产物，第一次被 Docker 拉起才知道坏。
+            sudo apt-get install -y qemu-user-static
+            echo "QEMU_LD_PREFIX=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
+            node scripts/verify.mjs --exe "$EXE" --runner qemu-aarch64-static
+          else
+            node scripts/verify.mjs --exe "$EXE"
+          fi
 
       - name: Sign plugin package
         shell: bash
-        if: steps.tag.outputs.tag != ''
         env:
           PLUGIN_KEY_JSON: ${{ secrets.AGENT2API_PLUGIN_KEY }}
           SKIP_SIGNING: ${{ secrets.AGENT2API_PLUGIN_KEY == 'SKIP' }}
@@ -180,27 +247,48 @@ jobs:
             exit 0
           fi
           printf '%s' "$PLUGIN_KEY_JSON" > plugin-signing-key.json
-          node scripts/sign.mjs sign --zip dist/*.zip --key plugin-signing-key.json
+          node scripts/sign.mjs sign --zip dist/*.zip --key plugin-signing-key.json --target "${{ matrix.target }}"
           rm -f plugin-signing-key.json
 
-      - name: Create GitHub release
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    # 三个平台的包齐了才发 Release：网关按 `<id>-<version>-<target>.zip`
+    # 精确匹配资源名，少一个平台就等于那个平台没有新版本。
+    needs: [sync, build]
+    if: needs.sync.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Check package set
         shell: bash
-        if: steps.tag.outputs.tag != ''
+        run: |
+          set -euo pipefail
+          ls -l dist
+          for target in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            ls dist/ssujojo-providers-*-${target}.zip
+          done
+
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ needs.sync.outputs.tag }}
+          VERSION: ${{ needs.sync.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" \
-            --prerelease \
-            --title "SsuJojo Providers v$VERSION (beta)" \
-            --notes "自动同步上游 Agent2Providers beta 并保留本地修复。"
+            --title "SsuJojo Providers v$VERSION" \
+            --notes "自动同步上游 Agent2Providers beta 并保留本地修复；包含 Windows 与两个 Linux 平台的包。"
 
-      - name: Upload package artifact
-        if: steps.tag.outputs.tag != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ssujojo-providers-${{ steps.tag.outputs.version }}-beta-${{ runner.os }}-${{ runner.arch }}
-          path: dist/*.zip
-          if-no-files-found: error
+

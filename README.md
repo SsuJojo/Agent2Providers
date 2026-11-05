@@ -8,6 +8,13 @@ renewal, model catalogs, balances and check-in. Available capabilities vary by p
 The gateway loads the plugin as a separate process, so a fault in one provider
 takes down that process and nothing else.
 
+This repository is a private fork of that upstream. It follows the upstream
+`beta` line (the actively developed one) through `.github/workflows/sync-upstream.yml`,
+keeps local fixes on top, and releases packages under the private pack id
+`ssujojo-providers` — a drop-in replacement for the official
+`agent2api-providers` package that avoids provider-id conflicts when both
+are installed.
+
 This repository also carries the two crates the gateway compiles against:
 `agent2api-provider-protocol` (the wire types) and `agent2api-provider-sdk`
 (the `Provider` trait and its serve loop). The gateway depends on this
@@ -92,6 +99,31 @@ The gateway checks that the current platform's entry point is in the package
 and refuses one that lacks it. Update checks match the asset name
 `<id>-<version>-<target>.zip` exactly, so the platform segment cannot be
 dropped from the filename.
+
+## Private fork releases
+
+Packaging for this fork never edits `pack.json` on the branch — it stays
+identical to upstream (`id: agent2api-providers`) so merges stay clean.
+Release builds generate a private manifest instead:
+
+```bash
+node scripts/release-manifest.mjs --out dist/pack.json
+node scripts/pack.mjs --out dist --target <target> --skip-build --manifest dist/pack.json
+node scripts/sign.mjs sign --zip dist/ssujojo-providers-*.zip --target <target>
+```
+
+The generated manifest keeps the full upstream provider set (the fork is a
+complete replacement, so existing account records keep working), rewrites the
+pack identity to `ssujojo-providers`, and points `entry` at
+`bin/ssujojo-providers[.exe]`. `scripts/release-manifest.mjs` fails the build on
+any missing or duplicated provider, wrong pack id or bad entry path;
+`node --test scripts/release-manifest.test.mjs` pins those rules.
+
+The sync workflow (`.github/workflows/sync-upstream.yml`) follows
+`upstream/beta` into this repository's `main`, builds Windows and both Linux
+targets, verifies each binary, signs the packages, and publishes
+`v<version>-fork.<run-number>` only after all three platform packages exist.
+The Linux packages are for server deployments of the gateway (no desktop UI).
 
 **Both Linux packages build against the bookworm generation.** The Docker
 runtime image is `debian:bookworm-slim` (glibc 2.36). A binary built on a newer

@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    {
+      "id": "ssujojo-providers",
+      "name": "SsuJojo 提供商",
+      "description": "SsuJojo 维护的提供商插件，官方 provider 包的私有替代；跟随上游 Agent2Providers beta 自动同步，包含本地修复。",
+      "official": false,
+      "author": "SsuJojo",
+      "manifest": "manifest.json",
+      "icon": "icon.png",
+      "source": { "repo": "SsuJojo/Agent2Providers" }
+    }
+  ]
+}

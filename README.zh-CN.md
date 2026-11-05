@@ -7,6 +7,11 @@
 网关把插件作为独立进程加载，因此某个提供商出故障只会让那个进程挂掉，
 不会影响网关其他部分。
 
+本仓库是上游的私有 fork：通过 `.github/workflows/sync-upstream.yml` 跟随上游
+`beta`（活跃开发线），在此基础上保留本地修复，并以私有包 id
+`ssujojo-providers` 发布 —— 作为官方 `agent2api-providers` 包的替代品，
+避免两个包同时安装时的 provider id 冲突。
+
 本仓库同时承载网关编译时所依赖的两个 crate：`agent2api-provider-protocol`
 （线上类型）和 `agent2api-provider-sdk`（`Provider` trait 及其 serve 循环）。
 网关通过 tag 引用本仓库。
@@ -89,6 +94,28 @@ mingw / osxcross / musl 工具链，把它塞进来只会多出一个注定失�
 
 网关会检查当前平台的入口点是否存在于包中，缺失则拒绝安装。更新检查按资源名
 `<id>-<version>-<target>.zip` 精确匹配，所以文件名里的平台段不能省略。
+
+## 私有 fork 发布
+
+本 fork 打包从不改分支上的 `pack.json` —— 它始终与上游一致
+（`id: agent2api-providers`），这样合并才不会冲突。发布构建改为临时生成
+私有清单：
+
+```bash
+node scripts/release-manifest.mjs --out dist/pack.json
+node scripts/pack.mjs --out dist --target <目标三元组> --skip-build --manifest dist/pack.json
+node scripts/sign.mjs sign --zip dist/ssujojo-providers-*.zip --target <目标三元组>
+```
+
+生成的清单保留上游全部 provider（私有包是完整替代品，已有账号记录不用迁移），
+把包身份改写为 `ssujojo-providers`，并把 `entry` 指向
+`bin/ssujojo-providers[.exe]`。`scripts/release-manifest.mjs` 在 provider 缺失或
+重复、包 id 错误、入口路径非法时直接让构建失败；
+`node --test scripts/release-manifest.test.mjs` 钉住这些规则。
+
+同步工作流（`.github/workflows/sync-upstream.yml`）把上游 `beta` 同步进本仓库
+`main`，构建 Windows 与两个 Linux 目标，逐个验证二进制、签名，三个平台的包
+齐了才发布 `v<版本>-fork.<构建号>`。Linux 包用于网关的服务器部署（无桌面）。
 
 **两个 Linux 包都基于 bookworm 这一代构建。** Docker 运行时镜像是
 `debian:bookworm-slim`（glibc 2.36）。在更新的发行版（如 Ubuntu 24.04，

@@ -28,6 +28,7 @@
  * node scripts/pack.mjs --target <三元组>      # 打指定平台（需已交叉编好）
  * node scripts/pack.mjs --skip-build          # 不重编，直接打现有二进制
  * node scripts/pack.mjs --out /tmp            # 指定输出目录
+ * node scripts/pack.mjs --manifest dist/pack.json  # 用生成的发布清单（私有包身份）
  * ```
  *
  * 退出码：0 = 成功；1 = 失败（二进制不存在 / pack.json 与目标平台对不上）。
@@ -154,14 +155,15 @@ function collectUi(manifest) {
 }
 
 function parseArgs(argv) {
-  const options = { out: join(PLUGIN_DIR, 'dist'), build: true, target: '' }
+  const options = { out: join(PLUGIN_DIR, 'dist'), build: true, target: '', manifest: '' }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--out') options.out = resolve(argv[++index] || options.out)
     else if (arg === '--target') options.target = argv[++index] || ''
     else if (arg === '--skip-build') options.build = false
+    else if (arg === '--manifest') options.manifest = resolve(argv[++index] || '')
     else if (arg === '--help' || arg === '-h') {
-      console.log('用法: node scripts/pack.mjs [--target <三元组>] [--out <目录>] [--skip-build]')
+      console.log('用法: node scripts/pack.mjs [--target <三元组>] [--out <目录>] [--skip-build] [--manifest <清单>]')
       process.exit(0)
     } else {
       console.error(`未知参数：${arg}`)
@@ -281,17 +283,28 @@ function main() {
   // ── 先校验清单（便宜），再编 / 找二进制（贵）─────────────────
   // 顺序反过来的话，`--target` 写错时用户看到的是「找不到 release 二进制」，
   // 会以为是没编过，实际上是这个平台压根没在 pack.json 里声明。
-  const manifestPath = join(PLUGIN_DIR, 'pack.json')
+  // 私有发布用 `--manifest dist/pack.json`（由 `scripts/release-manifest.mjs`
+  // 从上游清单生成，id 是私有包 id）。不给时打的就是仓库里的上游清单 ——
+  // 那会得到一个与官方同 id 的包，绝不用于发布。
+  const manifestPath = options.manifest || join(PLUGIN_DIR, 'pack.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  if (options.manifest && !manifest.id) {
+    console.error(`[pack] 发布清单缺少 id：${manifestPath}`)
+    process.exit(1)
+  }
   const declared = manifest.entry?.[target]
   if (!declared) {
     console.error(`[pack] pack.json 的 entry 里没有目标平台（${target}）`)
     console.error(`[pack] 现有条目：${Object.keys(manifest.entry || {}).join(', ') || '(空)'}`)
     process.exit(1)
   }
-  const expectedName = binaryName(target)
-  if (declared.split('/').pop() !== expectedName) {
-    console.error(`[pack] pack.json 的 entry（${declared}）与二进制名（${expectedName}）不一致`)
+  // 包里放什么名字由清单决定（私有包是 `bin/ssujojo-providers`），
+  // 编译产物名则固定是 cargo 的 `agent2api-providers`。
+  // 两者不必同名：网关只按 entry 找文件。这里只校验 entry 的
+  // 目录段是 `bin/` 且文件名非空，真正的「id ↔ 文件名」约束放在
+  // `release-manifest.mjs` 的单测里（它知道私有 id）。
+  if (!/^bin\/[^/]+$/.test(declared)) {
+    console.error(`[pack] pack.json 的 entry 必须是 bin/<文件名>，实际是 ${declared}`)
     process.exit(1)
   }
 
