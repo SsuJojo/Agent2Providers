@@ -88,6 +88,13 @@ jobs:
             git merge --no-ff --no-edit upstream/beta
           fi
           echo "before_sha=$BEFORE" >> "$GITHUB_OUTPUT"
+          # 冲突时 git merge 会以非零退出并把工作区留在半合并状态。这里显式
+          # 中止并给出可读原因：继续往下走会拿未合并的树去打包，产物不可信。
+          if [ -n "$(git ls-files -u)" ]; then
+            echo "::error::上游 beta 与本地补丁存在冲突，需人工解决后再同步"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
 
       - name: Validate local patches survive
         shell: bash
@@ -99,12 +106,12 @@ jobs:
 
       - name: Push updated beta
         shell: bash
-        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.mode == 'fast-forward'
+        if: steps.check.outputs.should_release == 'true'
         run: git push origin beta
 
       - name: Rewrite pack id for fork release
         shell: bash
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.tag.outputs.tag != ''
         run: |
           set -euo pipefail
           node - <<'NODE'
@@ -142,21 +149,23 @@ jobs:
           git push origin "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 上面提前 exit 时 tag 为空，后续所有构建 / 发布步骤都会跳过；
+          # 这里把结论写进日志，免得把「无事可做」误读成「发布成功」。
 
       - name: Install Rust
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.tag.outputs.tag != ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Build plugin package
         shell: bash
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.tag.outputs.tag != ''
         run: node scripts/pack.mjs --out dist --target x86_64-pc-windows-msvc
 
       - name: Sign plugin package
         shell: bash
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.tag.outputs.tag != ''
         env:
           PLUGIN_KEY_JSON: ${{ secrets.AGENT2API_PLUGIN_KEY }}
           SKIP_SIGNING: ${{ secrets.AGENT2API_PLUGIN_KEY == 'SKIP' }}
@@ -172,7 +181,7 @@ jobs:
 
       - name: Create GitHub release
         shell: bash
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
