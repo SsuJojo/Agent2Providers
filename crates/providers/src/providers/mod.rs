@@ -60,6 +60,10 @@ pub mod workbuddy;
 pub mod zcode;
 #[cfg(feature = "doubaowork")]
 pub mod doubaowork;
+#[cfg(feature = "kiro")]
+pub mod kiro;
+#[cfg(feature = "astudio")]
+pub mod astudio;
 
 use agent2api_provider_sdk::BoxProvider;
 
@@ -118,6 +122,14 @@ pub fn registry() -> Vec<BoxProvider> {
         list.push(Box::new(qoder::QODER_INTL));
     }
 
+    // 千问办公与 Qoder 是同一套协议栈，实现共用 `qoder` 模块（见
+    // `qoder/endpoints.rs` 的模块头）；两版同样是两个 provider、两个实例。
+    #[cfg(feature = "qwenwork")]
+    {
+        list.push(Box::new(qoder::QWENWORK_CN));
+        list.push(Box::new(qoder::QWENWORK_INTL));
+    }
+
     #[cfg(feature = "raccoon")]
     list.push(Box::new(raccoon::RaccoonProvider));
 
@@ -167,6 +179,12 @@ pub fn registry() -> Vec<BoxProvider> {
     list.push(Box::new(antigravity::adapter::ANTIGRAVITY));
     #[cfg(feature = "doubaowork")]
     list.push(Box::new(doubaowork::DoubaoWorkProvider));
+
+    #[cfg(feature = "kiro")]
+    list.push(Box::new(kiro::KiroProvider));
+
+    #[cfg(feature = "astudio")]
+    list.push(Box::new(astudio::AStudioProvider));
 
     list
 }
