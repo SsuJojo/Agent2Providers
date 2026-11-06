@@ -226,21 +226,22 @@ impl Provider for CatPawProvider {
     /// 思考等级绑定 → `reasoning_effort`（本家是**唯一需要归并档位**的一家）。
     ///
     /// ── 为什么本家要覆写 ────────────────────────────────────────
-    /// 本家的上游枚举只有 low / high / max 三个（`resolve_effort` 对别的值
-    /// **当场 400**），而网关的通用候选表是 6 档。不归并就会把 `medium` /
-    /// `xhigh` 这类完全合法的绑定打成 400 —— 那是把「绑定不生效」升级成
-    /// 「请求失败」，方向反了。归并规则（两两合流）与理由写在
-    /// `models::effort_for_level`。
+    /// 本家的上游枚举只有 low / high / max 三个，而网关的通用候选表是 6 档。
+    /// 不归并就会把 `medium` / `xhigh` 这类完全合法的绑定打成一次被上游拒绝的
+    /// 请求 —— 那是把「绑定不生效」升级成「请求失败」，方向反了。归并规则
+    /// （两两合流）与理由写在 `models::effort_for_level`；客户端显式传的档位
+    /// 走**同一条**规则（`models::resolve_effort`），两条路不会给出不同的档。
     ///
     /// ── 客户端已指定时为什么不覆盖 ──────────────────────────────
     /// 判据是 `resolve_effort(body)` 读出了东西（它认 `reasoning_effort` /
     /// `reasoningEffort` / `effort` 三个键，与转发时用的是**同一个函数**）。
     /// 用户在某一次请求里显式传了档位，那是比映射上的默认值更具体的意图。
     ///
-    /// **`Err` 也算「指定过」**（这一条容易写反）：客户端传了 `medium` 这类本家
-    /// 不认的值时，`resolve_effort` 报错，随后 `prepare::prepare` 会给出那条
-    /// 400。若此时注入绑定的档位，就把用户传错的参数**悄悄换掉**了 —— 请求
-    /// 变成成功，而他永远不知道自己传的值是无效的。
+    /// **`Err` 也算「指定过」**（这一条容易写反）：客户端传了空串或 `ultra`
+    /// 这类通用表外的值时，`resolve_effort` 报错，随后 `prepare::prepare` 会给出
+    /// 那条 400。若此时注入绑定的档位，就把用户传错的参数**悄悄换掉**了 —— 请求
+    /// 变成成功，而他永远不知道自己传的值是无效的。（`medium` / `xhigh` 不在此列：
+    /// 它们在 [`models::effort_for_level`] 里有确定的归属，收敛后照常发送。）
     fn reasoning_patch(&self, level: &str, _model: &str, body: &Value) -> proto::ReasoningPatch {
         let declared = match models::resolve_effort(body) {
             Ok(Some(_)) => true,

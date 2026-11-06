@@ -287,8 +287,28 @@ pub fn resolve_model_request(model: &Value) -> Result<ModelResolution, CatPawErr
 
 /// `reasoning_effort` → `declarativeParams.effort`（原实现 `resolveEffort`）。
 ///
-/// 取值只允许 low / high / max（上游枚举），其余报 400 —— 静默忽略会让
-/// 「客户端以为调了思考等级、实际没生效」无从发现。
+/// ── 与原实现的差别：通用档位**就近收敛**，不当场 400 ──────────
+/// 上游枚举只有 low / high / max（[`EFFORTS`]）。原实现对枚举外的值**当场 400**，
+/// 而网关的通用候选表是 6 档（`minimal` / `low` / `medium` / `high` / `xhigh` /
+/// `max`），客户端与上游编排层（Codex 的 `reasoning_effort`、Magpie 这类前置网关
+/// 的档位透传）传下来的完全可能是 `medium` / `xhigh`。那种请求本来是能用的，
+/// 因为「本家只有三档」而把它判定失败，方向反了 —— 用户表达的意图是
+/// 「更强 / 更弱」，不是「必须精确命中那一档」。
+///
+/// 所以这里走**与映射绑定同一条**归并规则（[`effort_for_level`]，两两合流）：
+/// ```text
+///   minimal | low   → low
+///   medium  | high  → high
+///   xhigh   | max   → max
+/// ```
+/// 收敛后的值就是随请求上行的字节（`prepare` 直接拿它写
+/// `declarativeParams.effort`），日志与真实请求不会分叉。
+///
+/// 仍然报错的两类（与「静默忽略」刻意区分开）：
+///   · **空串**：客户端写了等于没写，替它猜一档会把「参数无效」这件事藏起来；
+///   · **表外的自定义值**（`ultra` 之类）：没有任何一方能说明它对应哪一档，
+///     发出去仍然被上游拒，不如在这里就把话说清。
+/// 判据与 [`EFFORTS`] 同源：加一档时只改那一处，两处不会分叉。
 pub fn resolve_effort(body: &Value) -> Result<Option<String>, CatPawError> {
     // `body.reasoning_effort ?? body.reasoningEffort ?? body.effort`：**空值合并**
     // （空串也会命中并报错，不会被跳过）
@@ -301,25 +321,32 @@ pub fn resolve_effort(body: &Value) -> Result<Option<String>, CatPawError> {
         return Ok(None);
     };
     let value = value_text(raw).trim().to_ascii_lowercase();
-    // 校验用 [`EFFORTS`]（而不是在这里再列一遍三个字面量）：上游枚举与
-    // 「映射绑定怎么归并到这几个值」必须同源，否则加一档时只改一处，
-    // 另一处会把新档位当成非法值 400 掉
-    if !EFFORTS.iter().any(|known| *known == value) {
-        return Err(CatPawError::bad_request("reasoning_effort 仅支持 low / high / max"));
+    // 精确命中本家枚举：原样发（`max` 不该因为再折算一次而变档）
+    if EFFORTS.iter().any(|known| *known == value) {
+        return Ok(Some(value));
     }
-    Ok(Some(value))
+    // 通用 6 档里剩下的 `minimal` / `medium` / `xhigh`：就近折到本家档位
+    if let Some(collapsed) = effort_for_level(&value) {
+        return Ok(Some(collapsed.to_string()));
+    }
+    Err(CatPawError::bad_request(
+        "reasoning_effort 仅支持 low / high / max",
+    ))
 }
 
-/// 本家接受的三个档位（**由弱到强**）。`resolve_effort` 的硬校验与
+/// 本家接受的三个档位（**由弱到强**）。`resolve_effort` 的精确命中与
 /// [`effort_for_level`] 的归并都以这一份为准 —— 上游枚举改了这里改一处。
 pub const EFFORTS: &[&str] = &["low", "high", "max"];
 
 /// 网关映射上绑的**通用思考等级** → 本家的档位（`None` = 不注入）。
 ///
 /// ── 为什么必须归并（不能原样发）─────────────────────────────
-/// `resolve_effort` 对三个枚举之外的值**当场 400**，而网关的通用表是 6 档
-/// （`minimal` / `low` / `medium` / `high` / `xhigh` / `max`）—— 原样注入等于
-/// 让 `medium` / `xhigh` 这种合法绑定把一条本来能用的请求打成 400。
+/// 上游只认三个枚举值，而网关的通用表是 6 档（`minimal` / `low` / `medium` /
+/// `high` / `xhigh` / `max`）—— 原样注入等于让 `medium` / `xhigh` 这种合法
+/// 绑定把一条本来能用的请求打成一次被上游拒绝的失败。
+///
+/// 这一份规则同时是 [`resolve_effort`] 收敛**客户端显式档位**的依据
+/// （两条路同源，不会给出不同的档）。
 /// 归并规则是**两两合流**（`rank / 2`，由弱到强保持单调）：
 /// ```text
 ///   minimal | low   → low
@@ -331,7 +358,7 @@ pub const EFFORTS: &[&str] = &["low", "high", "max"];
 ///
 /// ── 表外的自定义等级为什么返回 None ────────────────────────
 /// 界面允许填表外值（照抄 OmniProxy 的自定义入口），但本家对未知值的反应是
-/// **400**，而这条请求在本功能之前是能用的。所以自定义值一律不注入
+/// 被上游拒绝，而这条请求在本功能之前是能用的。所以自定义值一律不注入
 /// （照旧保存、照旧显示），宁可这条绑定不生效，不可把请求弄坏。
 pub fn effort_for_level(level: &str) -> Option<&'static str> {
     let rank = crate::model_rules::reasoning_rank(level)?;
@@ -411,5 +438,66 @@ pub(super) fn value_text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    /// 就近收敛（本次修复的主案）：客户端传 `medium` 不再被打成 400，
+    /// 而是折到本家的 `high` —— 与映射绑定走同一条规则。
+    #[test]
+    fn a_generic_level_collapses_to_the_nearest_supported_effort() {
+        for (requested, expected) in [
+            ("minimal", "low"),
+            ("low", "low"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("max", "max"),
+        ] {
+            let body = serde_json::json!({ "reasoning_effort": requested });
+            assert_eq!(
+                resolve_effort(&body).ok().flatten().as_deref(),
+                Some(expected),
+                "档位 {requested} 应折到 {expected}"
+            );
+        }
+    }
+
+    /// 大小写与首尾空白宽容（`Medium` 是常见写法），三个候选键同源。
+    #[test]
+    fn casing_and_all_three_keys_are_accepted() {
+        for key in ["reasoning_effort", "reasoningEffort", "effort"] {
+            let body = serde_json::json!({ key: " Medium " });
+            assert_eq!(
+                resolve_effort(&body).ok().flatten().as_deref(),
+                Some("high"),
+                "键 {key} 必须与 reasoning_effort 同路径"
+            );
+        }
+    }
+
+    /// 仍然报错的两类：空串与通用表外的自定义值 —— 静默替用户猜一档会把
+    /// 「参数无效」这件事藏起来（口径与原实现一致）。
+    #[test]
+    fn empty_and_unknown_values_still_error() {
+        for requested in ["", "ultra", "off"] {
+            let body = serde_json::json!({ "reasoning_effort": requested });
+            assert!(
+                resolve_effort(&body).is_err(),
+                "{requested:?} 不该被猜成一档"
+            );
+        }
+        // 没写档位键：Ok(None)（不发 effort 字段），与报错是两件事
+        assert_eq!(resolve_effort(&serde_json::json!({})).ok().flatten(), None);
+        // null 不构成「指定过」，继续往后找，最终 None
+        assert_eq!(
+            resolve_effort(&serde_json::json!({ "reasoning_effort": null }))
+                .ok()
+                .flatten(),
+            None
+        );
     }
 }

@@ -248,6 +248,23 @@ fn normalize_entry(item: &Value) -> Option<Value> {
         if let Some(default_window) = enum_default(definitions, "context") {
             object.insert("defaultContextWindow".to_string(), Value::String(default_window));
         }
+        // 思考档位如实透出（`effort` ENUM，与 `context` 同一机制）：管理页的
+        // 档位下拉据此只给上游声明过的那几档，用户不会选到一个「选了之后
+        // 被就近收敛」的值。缺失 = 这个模型没有 `effort` 参数（上游真给过
+        // 这种条目），**不出这个键** —— 界面按「未声明」回落通用表，
+        // 与「声明了一个都没有」是两件事（网关 `core::model_meta` 同一口径）。
+        if let Some(levels) = enum_levels(definitions, "effort") {
+            object.insert(
+                "reasoningLevels".to_string(),
+                Value::Array(levels.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(default_level) = enum_default(definitions, "effort") {
+            object.insert(
+                "reasoningDefaultLevel".to_string(),
+                Value::String(default_level),
+            );
+        }
     }
     Some(entry)
 }
@@ -300,6 +317,30 @@ fn enum_default(definitions: &[Value], id: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+/// `parameterDefinitions[]` 里某个 ENUM 参数的**档位表**（字符串取值，
+/// 去空白、去空项、按上游顺序去重）。参数不存在或一个取值都没有时返回
+/// `None` —— 调用方据此**不出** `reasoningLevels` 这个键（「未声明」与
+/// 「声明了空表」在界面上是两件事）。
+fn enum_levels(definitions: &[Value], id: &str) -> Option<Vec<String>> {
+    let values = definitions
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(id))?
+        .get("values")?
+        .as_array()?;
+    let mut levels: Vec<String> = Vec::new();
+    for value in values {
+        let Some(text) = value.get("value").and_then(Value::as_str) else {
+            continue;
+        };
+        let level = text.trim().to_string();
+        if level.is_empty() || levels.iter().any(|known| known == &level) {
+            continue;
+        }
+        levels.push(level);
+    }
+    (!levels.is_empty()).then_some(levels)
 }
 
 /// 拉取并落地远程目录。
@@ -600,5 +641,58 @@ mod finalize_tests {
         );
         let absent = finalize_entry(serde_json::json!({ "id": "y" }));
         assert!(absent.get("defaultContextWindow").is_none());
+    }
+
+    /// 思考档位如实透出（本次修复的第二处）：管理页的档位下拉只该给出
+    /// 上游声明过的那几档，而不是通用八档 —— 否则用户会选到一个
+    /// 「选了之后被就近收敛」的值。
+    #[test]
+    fn the_effort_enum_becomes_reasoning_levels() {
+        let entry = normalize_entry(&serde_json::json!({
+            "modelTypeId": 91,
+            "modelTypeName": "glm-5.3-flash",
+            "supportThinking": true,
+            "extendedInfo": { "rateMultiplier": "0.06" },
+            "parameterDefinitions": [
+                { "id": "context", "type": "ENUM", "defaultValue": "1024000",
+                  "values": [{ "value": "204800" }, { "value": "1024000" }] },
+                { "id": "effort", "type": "ENUM", "defaultValue": "high",
+                  "values": [{ "value": "low" }, { "value": "high" }, { "value": "max" }] },
+            ],
+        }))
+        .expect("官方条目应被收下");
+        assert_eq!(
+            entry.get("reasoningLevels").and_then(Value::as_array).map(Vec::len),
+            Some(3),
+            "档位表必须逐字来自上游的 effort ENUM"
+        );
+        assert_eq!(
+            Some("high"),
+            entry.get("reasoningDefaultLevel").and_then(Value::as_str)
+        );
+    }
+
+    /// 没有 `effort` 参数的条目**不出**这两个键（「未声明」≠「一档都没有」）；
+    /// 上游给空表时同样不出。
+    #[test]
+    fn an_entry_without_an_effort_enum_declares_nothing() {
+        let bare = normalize_entry(&serde_json::json!({
+            "modelTypeId": 77,
+            "modelTypeName": "LongCat-2.0",
+            "supportThinking": false,
+        }))
+        .expect("官方条目应被收下");
+        assert!(bare.get("reasoningLevels").is_none());
+        assert!(bare.get("reasoningDefaultLevel").is_none());
+
+        let empty = normalize_entry(&serde_json::json!({
+            "modelTypeId": 98,
+            "modelTypeName": "glm-5.3-flashx",
+            "parameterDefinitions": [
+                { "id": "effort", "type": "ENUM", "values": [{ "value": "" }] },
+            ],
+        }))
+        .expect("官方条目应被收下");
+        assert!(empty.get("reasoningLevels").is_none(), "空表不等于声明了一档");
     }
 }
