@@ -65,6 +65,11 @@ const EXE = exeIndex >= 0 ? argv[exeIndex + 1] : DEFAULT_EXE
 // 「怎么启动它」的前缀（qemu-user-static）。不给时行为与以前完全一致。
 const runnerIndex = argv.indexOf('--runner')
 const RUNNER = runnerIndex >= 0 ? argv[runnerIndex + 1] : ''
+const INIT_ONLY = argv.includes('--init-only')
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log('用法: node scripts/verify.mjs [--exe <二进制>] [--runner <qemu 前缀>] [--init-only]')
+  process.exit(0)
+}
 
 /* ─── 结果记账 ───────────────────────────── */
 
@@ -359,6 +364,19 @@ async function main() {
     }
   } catch (e) {
     fail('init 返回 provider 列表', e.message)
+  }
+
+  // qemu-user-static 下完整协议套件要跑流式、回调、崩溃恢复等多组用例，
+  // 模拟 CPU 上很容易把 CI 拖到超时。交叉构建只需证明二进制能加载并
+  // 说出协议，原生平台仍跑完整套件。
+  if (INIT_ONLY) {
+    await client.stop()
+    upstream.server.close()
+    const total = results.length
+    const ok = total - failed
+    console.log(`\n${'─'.repeat(52)}`)
+    console.log(`通过 ${ok}/${total}${failed ? `，失败 ${failed}` : ''}（init-only）`)
+    process.exit(failed ? 1 : 0)
   }
 
   const demo = providers?.find((p) => p.id === 'demo')

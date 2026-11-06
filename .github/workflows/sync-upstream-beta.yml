@@ -272,7 +272,7 @@ jobs:
             # 没有这一步，arm64 包是纯编译产物，第一次被 Docker 拉起才知道坏。
             sudo apt-get install -y qemu-user-static
             echo "QEMU_LD_PREFIX=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
-            node scripts/verify.mjs --exe "$EXE" --runner qemu-aarch64-static
+            node scripts/verify.mjs --exe "$EXE" --runner qemu-aarch64-static --init-only
           else
             node scripts/verify.mjs --exe "$EXE"
           fi
