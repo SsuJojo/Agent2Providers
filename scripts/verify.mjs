@@ -65,6 +65,10 @@ const EXE = exeIndex >= 0 ? argv[exeIndex + 1] : DEFAULT_EXE
 // 「怎么启动它」的前缀（qemu-user-static）。不给时行为与以前完全一致。
 const runnerIndex = argv.indexOf('--runner')
 const RUNNER = runnerIndex >= 0 ? argv[runnerIndex + 1] : ''
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log('用法: node scripts/verify.mjs [--exe <二进制>] [--runner <qemu 前缀>]')
+  process.exit(0)
+}
 
 /* ─── 结果记账 ───────────────────────────── */
 
