@@ -34,6 +34,10 @@ on:
         description: "即使没有变化也重新构建并发布（验证签名与构建链路）"
         type: boolean
         default: false
+      dry_run:
+        description: "只验证三平台构建与签名，不推 tag、不发 Release"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -137,7 +141,7 @@ jobs:
 
       - name: Push updated beta
         shell: bash
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.check.outputs.should_release == 'true' && inputs.dry_run != true
         run: git push origin beta
 
       - name: Create release tag
@@ -152,7 +156,7 @@ jobs:
           # 私有版自己的后缀由 run 号决定，两者不能叠在一起（`beta.6-beta.9` 那种）。
           RAW="$(node -p "require('./pack.json').version")"
           CORE="${RAW%%-*}"
-          if [[ "${{ inputs.force_release }}" != "true" ]]; then
+          if [[ "${{ inputs.force_release }}" != "true" && "${{ inputs.dry_run }}" != "true" ]]; then
             LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
             if [[ -n "$LAST_RELEASE_TAG" ]]; then
               LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
@@ -168,8 +172,10 @@ jobs:
             echo "::error::tag $TAG 已存在（run 号重复），本次不发布；请重跑或人工处理"
             exit 1
           fi
-          git tag "$TAG"
-          git push origin "$TAG"
+          if [[ "${{ inputs.dry_run }}" != 'true' ]]; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
@@ -197,7 +203,7 @@ jobs:
       - name: Checkout release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.sync.outputs.tag }}
+          ref: ${{ inputs.dry_run == true && github.sha || needs.sync.outputs.tag }}
           fetch-depth: 0
 
       - name: Install Rust
@@ -283,7 +289,7 @@ jobs:
     # 三个平台的包齐了才发 Release：网关按 `<id>-<version>-<target>.zip`
     # 精确匹配资源名，少一个平台就等于那个平台没有新版本。
     needs: [sync, build]
-    if: needs.sync.outputs.tag != ''
+    if: needs.sync.outputs.tag != '' && inputs.dry_run != true
     runs-on: ubuntu-latest
     steps:
       - name: Download platform packages
@@ -306,6 +312,7 @@ jobs:
           # `{id}-{version}-{target}.zip`，网关拿它反推 target，名字对不上就是「本平台没有包」。
 
       - name: Create GitHub release
+        if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.sync.outputs.tag }}
@@ -318,3 +325,5 @@ jobs:
             --prerelease \
             --title "SsuJojo Providers v$VERSION (beta)" \
             --notes "push 到 beta 自动构建：同步上游 Agent2Providers beta 并保留本地修复；含 Windows 与两个 Linux 平台的包。"
+
+
