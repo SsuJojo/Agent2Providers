@@ -44,6 +44,16 @@ export const PRIVATE_PACK_NAME = 'SsuJojo 提供商'
 const PRIVATE_PACK_DESCRIPTION =
   '基于官方提供商增强同步的私有构建，包含本仓库的本地修复；与官方包同 id 的 provider 由本包接管。'
 
+/**
+ * 发布版本号的样子（`3.4.2` 或 `3.4.2-beta.7`）。
+ *
+ * 必须是网关 `compare_versions` 认得的形态：三段数字 + 可选的 `-预发布`。
+ * 预发布后缀不只是装饰 —— 私有 beta 包靠它每次都比上一次大（`run` 号在
+ * 宿主侧只做格式校验、不参与比较，见网关 `plugin_host::update::release_version`），
+ * 少了后缀就会永远判「已是最新」，自动更新静默失效。
+ */
+const RELEASE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/
+
 function readManifest(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
@@ -102,7 +112,12 @@ export function validateReleaseManifest(manifest, upstream) {
  * 只动身份字段（id / name / description / homepage）；provider 列表、
  * entry、ui、icons 全部原样沿用上游，保证「同一份能力，只换一个包 id」。
  */
-export function rewriteManifest(upstream) {
+export function rewriteManifest(upstream, version) {
+  if (version !== undefined && !RELEASE_VERSION_PATTERN.test(version)) {
+    throw new Error(
+      `发布版本号不是合法语义化版本：${version}（形如 3.4.2 或 3.4.2-beta.7）`,
+    )
+  }
   // 入口文件名跟着包 id 走：`bin/agent2api-providers` → `bin/ssujojo-providers`。
   // 二进制**编译产物名**仍是上游的（cargo 包名不变），只有包内路径改名 ——
   // 网关只认清单里的 entry，不关心 cargo 怎么叫它。
@@ -119,6 +134,7 @@ export function rewriteManifest(upstream) {
     name: PRIVATE_PACK_NAME,
     description: PRIVATE_PACK_DESCRIPTION,
     homepage: 'https://github.com/SsuJojo/Agent2Providers',
+    ...(version === undefined ? {} : { version }),
     entry,
   }
 }
@@ -128,15 +144,19 @@ function parseArgs(argv) {
     out: '',
     check: false,
     upstream: join(PLUGIN_DIR, 'pack.json'),
+    version: undefined,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--out') options.out = resolve(argv[++index] || '')
     else if (arg === '--upstream') options.upstream = resolve(argv[++index] || '')
     else if (arg === '--check') options.check = true
+    else if (arg === '--version') options.version = argv[++index] || ''
     else {
       console.error(`未知参数：${arg}`)
-      console.error('用法: node scripts/release-manifest.mjs [--out <路径>] [--upstream <路径>] [--check]')
+      console.error(
+        '用法: node scripts/release-manifest.mjs [--out <路径>] [--upstream <路径>] [--version <语义化版本>] [--check]',
+      )
       process.exit(2)
     }
   }
@@ -150,7 +170,13 @@ function main() {
     process.exit(1)
   }
   const upstream = readManifest(options.upstream)
-  const release = rewriteManifest(upstream)
+  let release
+  try {
+    release = rewriteManifest(upstream, options.version)
+  } catch (error) {
+    console.error(`[manifest] ${error.message}`)
+    process.exit(1)
+  }
   const problems = validateReleaseManifest(release, upstream)
   if (problems.length) {
     console.error('[manifest] 发布清单不合格：')

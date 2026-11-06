@@ -1,0 +1,320 @@
+name: sync-upstream-beta
+
+# 推 `beta` 就构建并发布私有插件包 —— 「commit + push 之后 gz4 自动用上改动」
+# 这条链路的**上半段**在这里，下半段是网关侧的插件自动更新（见 README）。
+#
+# ── 为什么必须有这条工作流 ──────────────────────────────────
+# gz4 这类无界面部署跑的是 Linux 包，而原先这份 beta 同步只编
+# `x86_64-pc-windows-msvc`：Windows 用户能收到更新，服务器永远停在旧包上。
+# 现在是三平台矩阵（Windows + Linux x86_64 + Linux arm64）。
+#
+# ── 版本号为什么写成 `3.4.2-beta.{run}` ─────────────────────
+# 私有版的 tag 是 `v{version}-fork-beta.{run}`。网关解析 tag 时**只取
+# `{version}`，`{run}` 仅做格式校验、不参与比较**（见网关
+# `plugin_host::update::release_version`）。所以如果 `{version}` 一直是
+# `pack.json` 里的 `3.4.2`，每次发布解析出来都是同一个版本，
+# `compare_versions(远端, 已装) == 0` → 永远判「已是最新」，自动更新静默失效
+# （这正是要根除的故障形态）。把 run 号写进预发布段，版本就逐次严格递增：
+# `3.4.2-beta.57 < 3.4.2-beta.58`（预发布段按数字比，不是按字典序）。
+# 核心号仍跟着上游走：上游发到 3.4.3，这边就是 `3.4.3-beta.N`。
+#
+# ── 会不会自己触发自己 ──────────────────────────────────────
+# 不会。同步任务用 `GITHUB_TOKEN` 合并上游并 push `beta`，而由该 token
+# 发起的 push 不会创建新的 workflow run，所以定时同步不会无限套娃。
+
+on:
+  push:
+    branches:
+      - beta
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "即使没有变化也重新构建并发布（验证签名与构建链路）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-beta
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    # `build` / `publish` 靠这些输出判断「这次到底要不要发」以及用哪个版本。
+    # 没有它们时 `needs.sync.outputs.tag` 恒为空，整个矩阵会被静默跳过 ——
+    # 症状是「同步成功了但没有任何新包」，比失败更难发现。
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      core: ${{ steps.tag.outputs.core }}
+    steps:
+      - name: Checkout fork beta
+        uses: actions/checkout@v4
+        with:
+          ref: beta
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream
+        shell: bash
+        run: git remote add upstream https://github.com/ProvidersPlugin/Agent2Providers.git
+
+      - name: Fetch upstream
+        shell: bash
+        run: git fetch upstream beta --tags
+
+      - name: Check for upstream updates
+        shell: bash
+        id: check
+        run: |
+          set -euo pipefail
+          LOCAL="$(git rev-parse HEAD)"
+          UPSTREAM="$(git rev-parse upstream/beta)"
+          if [[ "$LOCAL" == "$UPSTREAM" ]]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            if [[ "${{ inputs.force_release }}" == "true" ]]; then
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "No upstream updates; force_release requested."
+            else
+              echo "No upstream updates."
+            fi
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$LOCAL" "$UPSTREAM"; then
+            echo "mode=fast-forward" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor "$UPSTREAM" "$LOCAL"; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "local_sha=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward or merge upstream
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.check.outputs.mode }}" == "fast-forward" ]]; then
+            git merge --ff-only upstream/beta
+          else
+            git merge --no-ff --no-edit upstream/beta
+          fi
+          # 冲突时 git merge 会以非零退出并把工作区留在半合并状态。这里显式
+          # 中止并给出可读原因：继续往下走会拿未合并的树去打包，产物不可信。
+          if [ -n "$(git ls-files -u)" ]; then
+            echo "::error::上游 beta 与本地补丁存在冲突，需人工解决后再同步"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+
+      - name: Validate local patches survive
+        shell: bash
+        if: steps.check.outputs.updated == 'true' && steps.check.outputs.mode != 'none'
+        run: |
+          set -euo pipefail
+          # 校验 beta 分支**真的带着的**本地补丁。原来查的是 trae 的
+          # prompt_cache_key —— 那条当时只在 main 上，beta 上永远匹配不到，
+          # 一发生合并就会误报「本地补丁丢了」并中断同步。
+          grep -q 'check_body_limit' crates/providers/src/providers/catpaw/body_limit.rs
+          grep -q 'clamp_output_tokens' crates/providers/src/providers/officeace/chat.rs
+          grep -q 'channel_rejection' crates/providers/src/providers/workbuddy/errors.rs
+          grep -q 'prompt_cache_key' crates/providers/src/providers/trae/payload.rs
+
+      - name: Push updated beta
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        run: git push origin beta
+
+      - name: Create release tag
+        shell: bash
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        id: tag
+        run: |
+          set -euo pipefail
+          # 剥掉上游可能带的预发布后缀，只留核心三段：`3.3.0-beta.6` → `3.3.0`。
+          # 私有版自己的后缀由 run 号决定，两者不能叠在一起（`beta.6-beta.9` 那种）。
+          RAW="$(node -p "require('./pack.json').version")"
+          CORE="${RAW%%-*}"
+          if [[ "${{ inputs.force_release }}" != "true" ]]; then
+            LAST_RELEASE_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // empty')"
+            if [[ -n "$LAST_RELEASE_TAG" ]]; then
+              LAST_COMMIT="$(git rev-list -n 1 "$LAST_RELEASE_TAG")"
+              if git diff --quiet "$LAST_COMMIT" HEAD -- .; then
+                echo "No local changes since last release."
+                exit 0
+              fi
+            fi
+          fi
+          VERSION="${CORE}-beta.${GITHUB_RUN_NUMBER}"
+          TAG="v${VERSION}-fork-beta.${GITHUB_RUN_NUMBER}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG 已存在（run 号重复），本次不发布；请重跑或人工处理"
+            exit 1
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "core=$CORE" >> "$GITHUB_OUTPUT"
+          # 上面提前 exit 时 tag 为空，后续所有构建 / 发布步骤都会跳过；
+          # 这里把结论写进日志，免得把「无事可做」误读成「发布成功」。
+          echo "本次发布：$TAG（包版本 $VERSION）"
+
+  build:
+    # 每个平台各自编译、各自启动一次（`verify.mjs` 是端到端握手，不是只看编译
+    # 是否通过）。Windows 包给桌面端，Linux 包给 gz4 这类无界面部署。
+    needs: sync
+    if: needs.sync.outputs.tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Generate release manifest
+        shell: bash
+        # 包 id 与版本号都只在这里改写，**不回写分支**：分支上的 pack.json
+        # 永远等于上游，否则下一次 merge upstream 就在同一个文件上真冲突。
+        run: |
+          set -euo pipefail
+          node scripts/release-manifest.mjs \
+            --out dist/pack.json \
+            --version '${{ needs.sync.outputs.version }}'
+          node -p "require('./dist/pack.json')" | head -5
+
+      - name: Check release manifest
+        shell: bash
+        run: |
+          node --test scripts/release-manifest.test.mjs
+          node scripts/release-manifest.mjs --check
+
+      - name: Build plugin package
+        shell: bash
+        env:
+          # Linux 的 x86_64 包要在 ubuntu-22.04（glibc 2.35）上编，
+          # 与运行时 Debian bookworm（2.36）兼容；不要换到更新的 runner。
+          CARGO_TARGET_DIR: target
+        run: node scripts/pack.mjs --out dist --target ${{ matrix.target }} --manifest dist/pack.json
+
+      - name: Verify plugin binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="target/${{ matrix.target }}/release/agent2api-providers"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then EXE="$EXE.exe"; fi
+          if [[ "${{ matrix.target }}" == aarch64-unknown-linux-gnu ]]; then
+            # 交叉编出来的 arm64 二进制在 x86 runner 上不能直接 exec。
+            # 用 qemu 跑同一套握手，至少证明「能加载 + 能说协议」；
+            # 没有这一步，arm64 包是纯编译产物，第一次被 Docker 拉起才知道坏。
+            sudo apt-get install -y qemu-user-static
+            echo "QEMU_LD_PREFIX=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
+            node scripts/verify.mjs --exe "$EXE" --runner qemu-aarch64-static
+          else
+            node scripts/verify.mjs --exe "$EXE"
+          fi
+
+      - name: Sign plugin package
+        shell: bash
+        env:
+          PLUGIN_KEY_JSON: ${{ secrets.AGENT2API_PLUGIN_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PLUGIN_KEY_JSON" || "$PLUGIN_KEY_JSON" == 'SKIP' ]]; then
+            echo "::error::缺少 AGENT2API_PLUGIN_KEY：未签名的包不会被自动更新接受"
+            exit 1
+          fi
+          printf '%s' "$PLUGIN_KEY_JSON" > plugin-signing-key.json
+          node scripts/sign.mjs sign --zip dist/*.zip --key plugin-signing-key.json --target "${{ matrix.target }}"
+          rm -f plugin-signing-key.json
+
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    # 三个平台的包齐了才发 Release：网关按 `<id>-<version>-<target>.zip`
+    # 精确匹配资源名，少一个平台就等于那个平台没有新版本。
+    needs: [sync, build]
+    if: needs.sync.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Check package set
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          VERSION='${{ needs.sync.outputs.version }}'
+          for target in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            ls "dist/ssujojo-providers-${VERSION}-${target}.zip"
+          done
+          # 版本后缀必须逐字出现在文件名里：资产名模板是
+          # `{id}-{version}-{target}.zip`，网关拿它反推 target，名字对不上就是「本平台没有包」。
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.sync.outputs.tag }}
+          VERSION: ${{ needs.sync.outputs.version }}
+        run: |
+          set -euo pipefail
+          # --prerelease 是「加入 beta 版」开关的分界线；版本后缀本身也带
+          # `-beta.`，网关两处任一处认到都会当预发布处理。
+          gh release create "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --title "SsuJojo Providers v$VERSION (beta)" \
+            --notes "push 到 beta 自动构建：同步上游 Agent2Providers beta 并保留本地修复；含 Windows 与两个 Linux 平台的包。"
