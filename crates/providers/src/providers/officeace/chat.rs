@@ -8,23 +8,22 @@
 //!   · 体：标准 OpenAI chat；上游**恒流式**，所以要 `stream:true` +
 //!     `stream_options.include_usage`；非流式的客户端请求由本仓聚合器拼回。
 //!
-//! ── 两个实测坑（都写在这里，别在别处重推）──────────────────────
+//! ── 三个实测坑（都写在这里，别在别处重推）──────────────────────
 //!   1. **推理预算**：上游把 `max_tokens` 当「推理 + 正文」的总预算，给小了会
 //!      HTTP 200 但正文空串（`finish_reason=length`、`reasoning_tokens` 吃掉全部）。
 //!      这里的做法是**追加**一个下限（默认 1024），不是 `max()` —— `max()` 会把
 //!      「只想要 1 个 token」的意图改掉（见 `REASONING_ALLOWANCE`）。
 //!      `max_tokens < 16` 原样透传：那种请求本来就要最小输出。
-//!   2. **输出上限钳制**：华为云 ModelArts 对 `max_tokens` 有硬性区间校验 `[1, 131072]`。
-//!      Codex 等客户端发 Responses 请求或带 `max_completion_tokens: 307200` 时，
-//!      若不钳制会直接报错 `ModelArts.81001`。这里将 `max_tokens` / `max_completion_tokens`
-//!      超出部分钳制到 `MAX_OUTPUT_TOKENS` (131072)。
-//!   3. **`thinking` 参数**：`glm-5.3` 系列不收 `thinking:{"type":"disabled"}`，
+//!   2. **`thinking` 参数**：`glm-5.3` 系列不收 `thinking:{"type":"disabled"}`，
 //!      上游回 400。这里**不预先删**（不知道哪些模型不收），也**不做剥参重试** ——
 //!      本仓的编排层只有「按错误分类原地重发 / 换号」，没有「剥掉某个参数再试」
 //!      这条链（那是参考实现 officeace2api 的 `unsupportedParam` 分支，本仓未移植）。
 //!      于是客户端自带 `thinking` 时这一发会以 400 透传（同 body 重发结论不变），
 //!      去掉该字段即可。本家**自己从不注入** `thinking`：适配器没有实现
 //!      `reasoning_patch`，所以映射绑定的思考等级不会踩到这条（它对本家是空操作）。
+//!   3. **生成预算硬上限**：DeepSeek 为 393216，GLM 为 131072；超过时上游返回
+//!      400 `ModelArts.81001`。按模型取顶（见 `max_tokens_ceiling`），Qwen 与
+//!      未知模型不套静态上限；追加推理预算后再限制，避免把合法请求加到越界。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -37,8 +36,6 @@ use super::credentials::OfficeAceCredential;
 pub const REASONING_ALLOWANCE: i64 = 1024;
 /// 小于这个值的 `max_tokens` 原样透传（客户端要的就是最小输出）。
 pub const TINY_MAX_TOKENS: i64 = 16;
-/// 上游 ModelArts 对输出上限（`max_tokens` / `max_completion_tokens`）的硬顶 [1, 131072]。
-pub const MAX_OUTPUT_TOKENS: i64 = 131_072;
 
 /// 模型网关基址的规范形态：`https://<host>/v2`。
 ///
@@ -83,25 +80,37 @@ pub fn apply_reasoning_allowance(body: &mut Value) -> Option<(i64, i64)> {
     if requested < TINY_MAX_TOKENS {
         return None;
     }
-    let raised = requested + REASONING_ALLOWANCE;
+    let raised = requested.saturating_add(REASONING_ALLOWANCE);
     body["max_tokens"] = json!(raised);
     Some((requested, raised))
 }
 
-/// 出站请求体 `max_tokens` / `max_completion_tokens` 的上限钳制（就地修改）。
-///
-/// 华为云 ModelArts 限制数值范围 [1, 131072]，超出直接报 400 `ModelArts.81001`。
-pub fn clamp_output_tokens(body: &mut Value) {
-    let Some(object) = body.as_object_mut() else {
-        return;
-    };
-    for key in ["max_tokens", "max_completion_tokens"] {
-        if let Some(val) = object.get(key).and_then(Value::as_i64) {
-            if val > MAX_OUTPUT_TOKENS {
-                object.insert(key.to_string(), json!(MAX_OUTPUT_TOKENS));
-            }
-        }
+/// 果办上游明确报出的 `max_tokens` 参数上限：
+/// DeepSeek：`max_tokens range is [1, 393216]`；GLM：`限制数值范围[1,131072]`。
+/// Qwen 限制的是输入与生成的总长度，不套用这里的静态参数上限；未知模型同样不限制。
+fn max_tokens_ceiling(wire_model: &str) -> Option<i64> {
+    let name = wire_model.to_ascii_lowercase();
+    if name.contains("deepseek") {
+        Some(393_216)
+    } else if name.contains("glm") {
+        Some(131_072)
+    } else {
+        None
     }
+}
+
+/// 必须在追加推理预算之后调用；缺少字段或未超限时不改请求。
+///
+/// 本分支早先的全模型静态 131_072 钳制（含 `max_completion_tokens`）由上游的
+/// 按模型上限取代：DeepSeek 393_216、GLM 131_072、Qwen / 未知模型不钳。
+fn clamp_max_tokens(body: &mut Value) -> Option<i64> {
+    let ceiling = max_tokens_ceiling(body.get("model").and_then(Value::as_str)?)?;
+    let current = body.get("max_tokens").and_then(Value::as_i64)?;
+    if current <= ceiling {
+        return None;
+    }
+    body["max_tokens"] = json!(ceiling);
+    Some(ceiling)
 }
 
 /// 流式补 `stream_options.include_usage`（**不覆盖**客户端已有的取值）。
@@ -180,7 +189,7 @@ pub fn build_chat_plan(
         object.insert("stream".to_string(), Value::Bool(true));
     }
     apply_reasoning_allowance(&mut body);
-    clamp_output_tokens(&mut body);
+    clamp_max_tokens(&mut body);
     ensure_include_usage(&mut body);
 
     let mut headers = vec![
@@ -202,36 +211,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_clamp_output_tokens() {
-        let mut body = json!({
-            "max_completion_tokens": 307200,
-            "messages": []
-        });
-        clamp_output_tokens(&mut body);
-        assert_eq!(body["max_completion_tokens"], 131072);
+    fn test_clamp_max_tokens_follows_model_ceiling() {
+        // GLM：131_072
+        let mut glm = json!({ "model": "glm-5", "max_tokens": 200_000 });
+        assert_eq!(Some(131_072), clamp_max_tokens(&mut glm));
+        assert_eq!(glm["max_tokens"], 131_072);
 
-        let mut body_tokens = json!({
-            "max_tokens": 200000
-        });
-        clamp_output_tokens(&mut body_tokens);
-        assert_eq!(body_tokens["max_tokens"], 131072);
+        // DeepSeek：393_216，200K 没超限，不该被动
+        let mut deepseek = json!({ "model": "deepseek-v4", "max_tokens": 200_000 });
+        assert_eq!(None, clamp_max_tokens(&mut deepseek));
+        assert_eq!(deepseek["max_tokens"], 200_000);
 
-        let mut body_normal = json!({
-            "max_tokens": 4096
-        });
-        clamp_output_tokens(&mut body_normal);
-        assert_eq!(body_normal["max_tokens"], 4096);
+        // Qwen / 未知模型不套静态上限
+        let mut unknown = json!({ "model": "qwen4-max", "max_tokens": 900_000 });
+        assert_eq!(None, clamp_max_tokens(&mut unknown));
+        assert_eq!(unknown["max_tokens"], 900_000);
+
+        // 未超限原样不动
+        let mut normal = json!({ "model": "glm-5", "max_tokens": 4_096 });
+        assert_eq!(None, clamp_max_tokens(&mut normal));
+        assert_eq!(normal["max_tokens"], 4_096);
     }
 
     #[test]
     fn test_apply_reasoning_allowance_then_clamp() {
-        let mut body = json!({
-            "max_tokens": 131000
-        });
+        let mut body = json!({ "model": "glm-5", "max_tokens": 131_000 });
         apply_reasoning_allowance(&mut body);
-        // 131000 + 1024 = 132024 > 131072
-        assert_eq!(body["max_tokens"], 132024);
-        clamp_output_tokens(&mut body);
-        assert_eq!(body["max_tokens"], 131072);
+        // 131_000 + 1_024 = 132_024 > 131_072 → 钳回上限
+        assert_eq!(body["max_tokens"], 132_024);
+        assert_eq!(Some(131_072), clamp_max_tokens(&mut body));
+        assert_eq!(body["max_tokens"], 131_072);
     }
 }

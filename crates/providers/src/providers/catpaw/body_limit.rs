@@ -28,8 +28,6 @@
 //!     注入的系统提示词都会占字节），漏网时不能把 openresty 的 HTML 原样
 //!     丢给客户端。
 
-use crate::errors::GatewayError;
-
 use super::models::CatPawError;
 
 /// 入口的请求体上限：**1 MiB**（1,048,576 字节）。
@@ -42,7 +40,7 @@ pub const ENTRY_BODY_LIMIT_BYTES: i64 = 1_048_576;
 /// 体积拒绝过线用的状态码。
 ///
 /// 单独摘出来是因为它不只用于文案：宿主靠这个码认出「同家换号无效」
-/// （见 [`conversation_wire_message`]）。
+/// （状态码随控制消息结构化过线，见 adapter 的 `into_control_message`）。
 pub const ENTRY_BODY_LIMIT_STATUS: u16 = 413;
 
 /// 广告给下游的上下文窗口：**200K**。
@@ -129,26 +127,6 @@ pub fn check_body_limit(bytes: i64) -> Result<(), CatPawError> {
     Ok(())
 }
 
-/// 会话路径的错误怎么过线（只在这家改写，别家仍走 `into_message`）。
-///
-/// ── 为什么不能一律 `into_message` ──────────────────────────────
-/// `into_message` 只留文案，状态码在过线时丢掉，宿主看到的是 502。宿主的
-/// 「体积拒绝不换号」判据读的正是状态码（`PAYLOAD_BOUND_STATUSES`）——
-/// 只留文案时它**永远命中不了**，issue #6 的诉求 3 就只剩一句人话文案，
-/// 队列里每个账号照旧白撞一遍。
-///
-/// ── 为什么也不一律 `into_control_message` ──────────────────────
-/// 那会把 401 / 429 这些码一并带给宿主，顺带改变本家的既有语义（本家的分类
-/// 恒为 Fatal，这是原实现的核对结论，见 `adapter.rs` 模块头）。issue #6 只需要
-/// 体积这一档，其余仍按文案透传。
-pub fn conversation_wire_message(error: GatewayError) -> String {
-    if error.status_code == i32::from(ENTRY_BODY_LIMIT_STATUS) {
-        error.into_control_message()
-    } else {
-        error.into_message()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,13 +191,14 @@ mod tests {
         );
     }
 
-    /// 413 必须**带状态码**过线：宿主靠它认出「同家换号无效」。
+    /// 413 的状态码必须**结构化**过线：宿主靠它认出「同家换号无效」。
     ///
-    /// 改回 `into_message` 时这条会红 —— 那正是 issue #6 修不到位的样子：
-    /// 文案很好、宿主却在按 502 处理，队列里的账号照旧白撞。
+    /// 上游已把全部错误统一成控制消息（adapter 走 `into_control_message`），
+    /// 状态码随信封走 —— issue #6 的「体积拒绝不换号」判据在宿主侧依旧命中。
+    /// 改回只传文案时这条会红 —— 那正是 issue #6 修不到位的样子。
     #[test]
     fn a_body_limit_error_carries_its_status_over_the_wire() {
-        let wire = conversation_wire_message(oversized_error(2_000_000).to_gateway());
+        let wire = oversized_error(2_000_000).to_gateway().into_control_message();
         assert!(
             wire.contains("\"status\":413"),
             "413 要真的进信封，宿主才可能停在同家不再换号：{wire}"
@@ -228,9 +207,5 @@ mod tests {
             wire.contains("已在本地拦下"),
             "文案不能因为换了个信封就丢：{wire}"
         );
-        // 反面对照：别的错误仍只过文案，不把 401 / 429 这类码顺带改语义。
-        let other = conversation_wire_message(CatPawError::upstream("上游请求失败").to_gateway());
-        assert!(!other.contains("CONTROL_ERROR:"), "非体积错误不该改过线形态：{other}");
-        assert_eq!("上游请求失败", other);
     }
 }
